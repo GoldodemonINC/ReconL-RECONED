@@ -6,6 +6,7 @@ members = [
     "tools/host",
     "tools/reconl-bench",
     "tools/reconl-info",
+    "Tester Application",
     "core",
     "raster",
     "shadow",
@@ -13,10 +14,12 @@ members = [
     "scene",
     "contract",
     "backends/null",
+    "backends/vulkan",
     "backends/soft-cpu",
     "backends/d3d11",
     "backends/gpu-compute",
     "ffi",
+    "rust-probes",
 ]
 
 [workspace.package]
@@ -37,6 +40,7 @@ reconl-backend-null = { path = "backends/null" }
 reconl-backend-softcpu = { path = "backends/soft-cpu" }
 reconl-backend-d3d11 = { path = "backends/d3d11" }
 reconl-backend-gpucompute = { path = "backends/gpu-compute" }
+reconl-backend-vulkan = { path = "backends/vulkan" }
 reconl-png = { path = "tools/png" }
 reconl-host = { path = "tools/host" }
 reconl = { package = "reconl-ffi", path = "ffi" }
@@ -46,8 +50,8 @@ reconl = { package = "reconl-ffi", path = "ffi" }
 # what ships.
 [profile.release]
 opt-level = 3
-lto = "thin"
-codegen-units = 1
+lto = "off"
+codegen-units = 16
 panic = "abort"
 
 [profile.dev]

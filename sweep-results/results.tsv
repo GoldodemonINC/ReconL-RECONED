@@ -1,0 +1,92 @@
+# ReconL resolution/shadow/backends sweep
+# target: 120+ FPS (--target-ms=8)
+# date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+#
+# columns: backend_desc  tier  resolution  frame_WxH  shadow_mode  shadow_cascades  shadow_budget  warmup  frames  fps  total_ms  shadow_ns  alloc_per_frame  result
+#
+date: 2026-11-03T08:13:27Z
+# target fps: 120 (--target-ms=8)
+auto	12k	12288x6480	6k	on	2	84934656	10	15	NA	NA	NA	NA	no-instrumentation	auto
+T1/gpu-shared
+auto	6k	6144x3456	4k	on	2	33177600	8	20	1.5	648.536	586.7	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	4k	3840x2160	2k	on	2	14745600	5	30	5.6	179.318	263.7	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	2k	2560x1440	1080	on	2	8294400	5	60	19.4	51.591	238.6	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	1080	1920x1080	480	on	2	2073600	5	60	26.8	37.277	210.3	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	12k	12288x6480	12k	on	2	318504960	10	15	NA	NA	NA	NA	no-instrumentation	auto
+T1/gpu-shared
+auto	6k	6144x3456	6k	on	2	84934656	8	20	1.5	677.251	997.2	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	4k	3840x2160	4k	on	2	33177600	5	30	3.3	299.825	937.0	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	2k	2560x1440	2k	on	2	14745600	5	60	12.2	81.715	345.5	NA	FAIL-120	auto
+T1/gpu-shared
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+auto	1080	1920x1080	1080	on	2	8294400	5	60	125.7	7.958	407.2	NA	PASS-120	auto
+T1/gpu-shared
+T1/gpu-shared
+igpu	1080	1920x1080	1080	on	2	8294400	5	60	19.9	50.301	286.5	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+igpu	1080	1920x1080	480	on	2	2073600	5	60	25.3	39.583	321.3	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+cpu	1080	1920x1080	1080	on	2	8294400	5	60	1.0	1.035	1.082	NA	FAIL-120	T2/cpu-ram
+T2/cpu-ram
+T4/out-of-core
+cpu	1080	1920x1080	480	on	2	2073600	5	60	0.9	1.101	1.207	NA	FAIL-120	T2/cpu-ram
+T2/cpu-ram
+T4/out-of-core
+cpu+igpu	1080	1920x1080	1080	on	2	8294400	5	60	27.7	36.166	214.9	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+cpu+igpu	1080	1920x1080	480	on	2	2073600	5	60	29.2	34.205	215.9	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+cpu+disk	1080	1920x1080	1080	cached	2	8294400	5	60	1.0	975.314	1.166	NA	FAIL-120	T4/out-of-core
+T4/out-of-core
+T4/out-of-core
+cpu+disk	1080	1920x1080	480	cached	2	2073600	5	60	1.0	990.805	1.538	NA	FAIL-120	T4/out-of-core
+T4/out-of-core
+T4/out-of-core
+cpu+igpu+disk	1080	1920x1080	1080	cached	2	8294400	5	60	22.9	43.654	282.7	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core
+cpu+igpu+disk	1080	1920x1080	480	cached	2	2073600	5	60	21.7	46.122	304.9	NA	FAIL-120	auto
+T0/gpu-discrete
+(ffi\src\offload.rs:234)
+measured
+T4/out-of-core

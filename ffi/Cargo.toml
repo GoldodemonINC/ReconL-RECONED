@@ -18,6 +18,7 @@ reconl-backend-null = { workspace = true }
 reconl-backend-softcpu = { workspace = true }
 reconl-backend-d3d11 = { workspace = true }
 reconl-backend-gpucompute = { workspace = true }
+reconl-backend-vulkan = { workspace = true }
 
 [lib]
 name = "reconl"

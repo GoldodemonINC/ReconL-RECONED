@@ -1,0 +1,17 @@
+[package]
+name = "reconl-tester"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "An interactive ReconL test scene: walls, shapes, shadows and reflections with live settings and frame statistics."
+
+[[bin]]
+name = "reconl-tester"
+path = "src/main.rs"
+
+[dependencies]
+reconl = { workspace = true }
+reconl-host = { workspace = true }
+reconl-png = { workspace = true }
+minifb = "0.29"

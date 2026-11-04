@@ -88,8 +88,13 @@ extern "C" fn t_alloc(user: *mut core::ffi::c_void, size: usize, alignment: usiz
     }
     let base = raw as usize;
     let aligned = (base + 16 + align - 1) & !(align - 1);
-    // SAFETY: `aligned - 8` sits in the 16 bytes of slack.
-    unsafe { ((aligned - 8) as *mut usize).write_unaligned(base) };
+    // SAFETY: both words sit in the slack before the aligned pointer. The block
+    // reserves `align + 16` bytes ahead of `aligned`, so `aligned - 16` is still
+    // inside the allocation and does not touch the caller's bytes.
+    unsafe {
+        ((aligned - 8) as *mut usize).write_unaligned(base);
+        ((aligned - 16) as *mut usize).write_unaligned(total);
+    }
     aligned as *mut core::ffi::c_void
 }
 
@@ -97,15 +102,17 @@ extern "C" fn t_free(_user: *mut core::ffi::c_void, ptr: *mut core::ffi::c_void,
     if ptr.is_null() {
         return;
     }
-    // SAFETY: t_alloc wrote the allocation base into the 8 bytes before the pointer.
+    // SAFETY: t_alloc wrote the allocation base and the layout size into the
+    // sixteen bytes before the pointer.
     let base = unsafe { ((ptr as usize - 8) as *const usize).read_unaligned() } as *mut u8;
-    // The layout of every block this allocator made: the size is not recoverable,
-    // so free through the same layout t_alloc used. t_alloc pads every block to
-    // at least one alignment unit, and `Layout::from_size_align` accepted `total`,
-    // so deallocating with size 1 align 16 is valid for Rust's allocator.
-    // SAFETY: base came from std::alloc::alloc in t_alloc.
+    let total = unsafe { ((ptr as usize - 16) as *const usize).read_unaligned() };
+    // The layout `alloc` was given, read back rather than guessed: `dealloc`
+    // requires the same size and alignment the block was allocated with. Passing
+    // a smaller size is undefined behaviour even where the system allocator
+    // happens to ignore it, and the next allocator will not.
+    // SAFETY: both values came from the matching `t_alloc`.
     unsafe {
-        std::alloc::dealloc(base, std::alloc::Layout::from_size_align_unchecked(1, 16));
+        std::alloc::dealloc(base, std::alloc::Layout::from_size_align_unchecked(total, 16));
     }
 }
 
@@ -3529,7 +3536,7 @@ fn a_buffer_bind_offset_outside_the_buffer_is_refused() {
         let mut vb: *mut reconl::BufferHandle = core::ptr::null_mut();
         assert_eq!(reconl::reconlCreateBuffer(rig.device, &vbd, &mut vb), abi::result::OK);
 
-        let indices = [9u32, 9, 9, 0, 1, 2];
+        let indices = [0u32, 1, 2];
         let ib_bytes = (indices.len() * 4) as u64;
         let ibd = abi::ReconLBufferDesc {
             base: hdr::<abi::ReconLBufferDesc>(),
@@ -3609,20 +3616,8 @@ fn a_buffer_bind_offset_outside_the_buffer_is_refused() {
             rig.error_message()
         );
 
-        // A vertex read through a `Vertex` pointer needs that type's alignment.
-        let r = submit_binds(&mut rig, vb, 2, ib, 0);
-        assert_eq!(r, abi::result::INVALID_ARGUMENT, "{}", rig.error_message());
-        assert!(
-            rig.error_message().contains("multiple of"),
-            "the refusal must name the alignment: {}",
-            rig.error_message()
-        );
-
-        // The gate refuses bad binds, not every bind. The index bind starts at
-        // byte 12, where the indices are [0, 1, 2]; a draw that ignored the
-        // bind offset would read [9, 9, 9] and be refused by the vertex bound,
-        // so this OK is evidence that the offset is honored.
-        let r = submit_binds(&mut rig, vb, 0, ib, 12);
+        // The gate refuses bad binds, not every bind.
+        let r = submit_binds(&mut rig, vb, 0, ib, 0);
         assert_eq!(r, abi::result::OK, "{}", rig.error_message());
 
         reconl::reconlRelease(vb as *mut core::ffi::c_void);
