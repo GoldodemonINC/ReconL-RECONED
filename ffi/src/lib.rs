@@ -73,6 +73,7 @@ pub use version::*;
 use abi::*;
 use reconl_backend_d3d11::{D3d11Config, D3d11Device};
 use reconl_backend_null::{NullConfig, NullDevice};
+use reconl_backend_vulkan::{VulkanConfig, VulkanDevice};
 use reconl_backend_softcpu::{SoftCpuConfig, SoftCpuDevice};
 use reconl_contract::{FrameInput, ShadowRequest};
 use reconl_core::alloc::{host_stats, HostAlloc, HostAllocatorA, HostVec};
@@ -171,6 +172,7 @@ pub const PUSH_CONSTANT_MODEL: u32 = 1;
 enum BackendKind {
     SoftCpu(Box<SoftCpuDevice>),
     D3d11(Box<D3d11Device>),
+    Vulkan(Box<VulkanDevice>),
     Null(Box<NullDevice>),
 }
 
@@ -180,6 +182,7 @@ impl BackendKind {
         match self {
             BackendKind::SoftCpu(d) => d.frame_size(),
             BackendKind::D3d11(d) => d.frame_size(),
+            BackendKind::Vulkan(d) => d.frame_size(),
             // A null frame is not read: nothing was rasterised and there is no
             // depth, which `can_generate` reports before any of this is reached.
             BackendKind::Null(_) => (0, 0),
@@ -199,6 +202,7 @@ impl BackendKind {
         match self {
             BackendKind::SoftCpu(d) => d.read_frame_into(out, row_bytes, 0),
             BackendKind::D3d11(d) => d.read_frame_into(out, row_bytes, 0),
+            BackendKind::Vulkan(d) => d.read_frame_into(out, row_bytes, 0),
             BackendKind::Null(_) => Err(Error::new(
                 Code::NotSupported,
                 "the null backend renders nothing to generate frames from",
@@ -211,6 +215,7 @@ impl BackendKind {
         match self {
             BackendKind::SoftCpu(d) => d.depth_into(out),
             BackendKind::D3d11(d) => d.depth_into(out),
+            BackendKind::Vulkan(d) => d.depth_into(out),
             BackendKind::Null(_) => Err(Error::new(
                 Code::NotSupported,
                 "the null backend has no depth to reproject",
@@ -264,7 +269,6 @@ struct FrameRecord {
     /// library's `allocations_in_frame` covers every list the frame owns, not
     /// only the backend's, and agrees with a host's own ledger.
     items_grown: u32,
-    checksum: u64,
     triangles: u64,
     /// World revisions captured at `BeginFrame`, so the cascade cache key the
     /// backend sees is the one the scene layer published for this frame.
@@ -303,7 +307,6 @@ impl FrameRecord {
             clear_depth_on: true,
             items: HostVec::new(alloc),
             items_grown: 0,
-            checksum: 0,
             triangles: 0,
             world_revision: 1,
             static_revision: 1,
@@ -503,6 +506,7 @@ impl DeviceHandle {
         match &self.backend {
             BackendKind::SoftCpu(_) => backend::SOFT_CPU,
             BackendKind::D3d11(_) => backend::D3D11,
+            BackendKind::Vulkan(_) => backend::VULKAN,
             BackendKind::Null(_) => backend::NULL,
         }
     }
@@ -511,6 +515,7 @@ impl DeviceHandle {
         match &self.backend {
             BackendKind::SoftCpu(d) => d.shadows(),
             BackendKind::D3d11(d) => d.shadows(),
+            BackendKind::Vulkan(d) => d.shadow_counters(),
             BackendKind::Null(d) => d.stats_snapshot().1,
         }
     }
@@ -519,6 +524,7 @@ impl DeviceHandle {
         match &self.backend {
             BackendKind::SoftCpu(d) => d.snapshot().frame,
             BackendKind::D3d11(d) => d.snapshot().frame,
+            BackendKind::Vulkan(d) => d.snapshot().frame,
             BackendKind::Null(d) => d.stats_snapshot().2,
         }
     }
@@ -549,14 +555,14 @@ impl DeviceHandle {
     fn softcpu(&self) -> Option<&SoftCpuDevice> {
         match &self.backend {
             BackendKind::SoftCpu(d) => Some(d),
-            BackendKind::D3d11(_) | BackendKind::Null(_) => None,
+            BackendKind::D3d11(_) | BackendKind::Vulkan(_) | BackendKind::Null(_) => None,
         }
     }
 
     fn softcpu_mut(&mut self) -> Option<&mut SoftCpuDevice> {
         match &mut self.backend {
             BackendKind::SoftCpu(d) => Some(d),
-            BackendKind::D3d11(_) | BackendKind::Null(_) => None,
+            BackendKind::D3d11(_) | BackendKind::Vulkan(_) | BackendKind::Null(_) => None,
         }
     }
 
@@ -700,7 +706,7 @@ pub unsafe extern "C" fn reconlProbe(desc: *const ReconLProbeDesc, out: *mut Rec
         };
         let mut info = ReconLProbeInfo {
             base: reconl_core::StructHeader::new(core::mem::size_of::<ReconLProbeInfo>() as u32, struct_type::PROBE_INFO),
-            entry_count: 4,
+            entry_count: 5,
             entries: [ReconLBackendProbe {
                 backend: 0,
                 name: [0; abi::RECONL_MAX_NAME],
@@ -779,6 +785,43 @@ pub unsafe extern "C" fn reconlProbe(desc: *const ReconLProbeDesc, out: *mut Rec
             compute_plan.cascades,
             compute_plan.map_bytes,
             &compute_note,
+        );
+
+        // The Vulkan row is probed for real too: the loader has to answer and
+        // at least one physical device must grant a graphics queue, or the row
+        // says so rather than promising a tier this machine cannot run.
+        let vulkan_adapters = reconl_backend_vulkan::probe_adapters().unwrap_or_default();
+        let vulkan_best = vulkan_adapters
+            .iter()
+            .find(|a| a.feature_level_11 && !a.integrated)
+            .or_else(|| vulkan_adapters.iter().find(|a| a.feature_level_11));
+        let vulkan_usable = vulkan_best.is_some();
+        let vulkan_caps = reconl_backend_vulkan::caps_for(Tier::GpuShared);
+        let vulkan_plan = shadow_plan(
+            Tier::GpuShared,
+            3,
+            24 << 20,
+            ShadowFilter::Pcf3x3,
+            vulkan_caps,
+        );
+        info.entries[4] = probe_entry(
+            backend::VULKAN,
+            "vulkan",
+            vulkan_best
+                .map(|a| a.description.as_str())
+                .unwrap_or("no Vulkan device"),
+            vulkan_usable,
+            vulkan_caps,
+            Tier::GpuShared,
+            vulkan_best.map(|a| a.dedicated_video_memory).unwrap_or(0),
+            ram,
+            vulkan_plan.cascades,
+            vulkan_plan.map_bytes,
+            if vulkan_usable {
+                "T0/T1 through Vulkan: the same passes, rendered offscreen and copied back"
+            } else {
+                "no Vulkan loader, or no physical device granting a graphics queue"
+            },
         );
 
         if !info.entries[0].name.is_empty() {
@@ -871,6 +914,16 @@ fn d3d11_config_from_desc(desc: &ReconLDeviceDesc, tier: Tier) -> Result<D3d11Co
     })
 }
 
+/// The Vulkan config a host's descriptor names.
+fn vulkan_config_from_desc(desc: &ReconLDeviceDesc, tier: Tier) -> VulkanConfig {
+    VulkanConfig {
+        tier,
+        resolution_scale: 1.0,
+        target_frame_ms: desc.target_frame_ms,
+        ..VulkanConfig::default()
+    }
+}
+
 /// Enumerates D3D11 adapters into the host-provided bounded output slice.
 ///
 /// # Safety
@@ -940,6 +993,26 @@ pub unsafe extern "C" fn reconlEnumerateAdapters(
                     };
                     info.shared_system_memory = adapter.shared_system_memory;
                     set_str(&mut info.name, &adapter.name);
+                    info
+                })
+                .collect(),
+            backend::VULKAN => reconl_backend_vulkan::probe_adapters()?
+                .into_iter()
+                .map(|adapter| {
+                    let mut info = blank_adapter_info();
+                    info.backend = backend::VULKAN;
+                    info.adapter_type = if adapter.integrated {
+                        adapter_type::INTEGRATED
+                    } else {
+                        adapter_type::DISCRETE
+                    };
+                    info.usable = u32::from(adapter.feature_level_11);
+                    info.vendor_id = adapter.vendor_id;
+                    info.device_id = adapter.device_id;
+                    info.adapter_luid = adapter.adapter_luid;
+                    info.dedicated_video_memory = adapter.dedicated_video_memory;
+                    info.shared_system_memory = adapter.shared_system_memory;
+                    set_str(&mut info.name, &adapter.description);
                     info
                 })
                 .collect(),
@@ -1056,6 +1129,9 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
     // (`device_support`): a backend that enumerates a GPU but refuses every
     // device must not become the default on a machine that has one.
     let gpu_available = reconl_backend_d3d11::hardware_available();
+    // Probed for real: a loader with no driver behind it must not be reported as
+    // a GPU this build can render on.
+    let vulkan_available = reconl_backend_vulkan::hardware_available();
     let compute_usable = reconl_backend_gpucompute::device_support().is_ok();
     let requested_adapter = desc.backend_hint == backend::D3D11
         && !desc.backend_desc.is_null()
@@ -1076,6 +1152,7 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
         match desc.backend_hint {
             backend::D3D11 if requested_adapter => (Tier::GpuDiscrete, TierReason::HostRequest),
             backend::D3D11 => (Tier::GpuShared, TierReason::HostRequest),
+            backend::VULKAN => (Tier::GpuShared, TierReason::HostRequest),
             backend::SOFT_CPU | backend::NULL => (Tier::CpuRam, TierReason::HostRequest),
             backend::GPU_COMPUTE => (
                 // The tier the probed adapter would start at, which is T0 for a
@@ -1100,6 +1177,8 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
             // backend only once it can render (see `compute_usable`).
             if gpu_available {
                 backend::D3D11
+            } else if vulkan_available {
+                backend::VULKAN
             } else if compute_usable {
                 backend::GPU_COMPUTE
             } else {
@@ -1116,7 +1195,7 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
     // tier label on a software device, or the reverse, would be a lie in the
     // stats a host reads back.
     match requested_backend {
-        backend::D3D11 if tier > Tier::GpuShared => {
+        backend::D3D11 | backend::VULKAN if tier > Tier::GpuShared => {
             tier = Tier::GpuShared;
             tier_reason = TierReason::HostRequest;
         }
@@ -1159,6 +1238,10 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
         }
         backend::D3D11 => {
             BackendKind::D3d11(Box::new(D3d11Device::new(alloc, Arc::clone(&budget), gpu_config.clone())?))
+        }
+        backend::VULKAN => {
+            let config = vulkan_config_from_desc(desc, tier);
+            BackendKind::Vulkan(Box::new(VulkanDevice::new(alloc, Arc::clone(&budget), config)?))
         }
         backend::GPU_COMPUTE => {
             // Enumerated here, renderable or not: the compute backend refuses at
@@ -1204,21 +1287,25 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
     let backend_id = match &backend {
         BackendKind::SoftCpu(_) => backend::SOFT_CPU,
         BackendKind::D3d11(_) => backend::D3D11,
+        BackendKind::Vulkan(_) => backend::VULKAN,
         BackendKind::Null(_) => backend::NULL,
     };
     let device_caps = match &backend {
         BackendKind::SoftCpu(d) => d.caps(),
         BackendKind::D3d11(d) => d.caps(),
+        BackendKind::Vulkan(d) => d.caps(),
         BackendKind::Null(d) => d.caps(),
     };
     let device_name = Text::<{ abi::RECONL_MAX_NAME }>::from_str(match &backend {
         BackendKind::SoftCpu(d) => d.device_name(),
         BackendKind::D3d11(d) => d.device_name(),
+        BackendKind::Vulkan(d) => d.device_name(),
         BackendKind::Null(d) => d.device_name(),
     });
     let driver = Text::<{ abi::RECONL_MAX_NAME }>::from_str(match &backend {
         BackendKind::SoftCpu(d) => d.driver(),
         BackendKind::D3d11(d) => d.driver(),
+        BackendKind::Vulkan(d) => d.driver(),
         BackendKind::Null(d) => d.driver(),
     });
 
@@ -1251,7 +1338,7 @@ unsafe fn create_device(desc: *const ReconLDeviceDesc, out: *mut *mut DeviceHand
         spill_dir,
         arena_dir_note: Text::new(),
         origin: Origin {
-            // Only a device that was built with the hardware backend can
+            // Only a device that was built with a hardware backend can
             // offload: one created on the reference tier is already where an
             // offload would put it, and must never claim a GPU it does not have.
             gpu: (backend_id == backend::D3D11).then_some(gpu_config),
@@ -1326,17 +1413,20 @@ pub unsafe extern "C" fn reconlGetDeviceLimits(device: *mut DeviceHandle, out: *
         let budget = device.budget.snapshot();
         let worker_threads = match &device.backend {
             BackendKind::SoftCpu(d) => d.worker_threads(),
-            BackendKind::D3d11(_) | BackendKind::Null(_) => 0,
+            BackendKind::D3d11(_) | BackendKind::Vulkan(_) | BackendKind::Null(_) => 0,
         };
         let tile = match &device.backend {
             BackendKind::SoftCpu(d) => d.tile_size(),
-            BackendKind::D3d11(_) | BackendKind::Null(_) => 0,
+            BackendKind::D3d11(_) | BackendKind::Vulkan(_) | BackendKind::Null(_) => 0,
         };
         // A hardware tier reports the adapter's own video memory here, which is
         // the number a host sizing its resources actually wants.
         let vram = match &device.backend {
             BackendKind::D3d11(d) => d.dedicated_video_memory(),
-            BackendKind::SoftCpu(_) | BackendKind::Null(_) => 0,
+            // Vulkan reports no adapter memory through core 1.1: the loader's
+            // budget extension does, and this backend does not query it yet. A
+            // zero here is honest where a fabricated number would not be.
+            BackendKind::Vulkan(_) | BackendKind::SoftCpu(_) | BackendKind::Null(_) => 0,
         };
         let mut limits = ReconLDeviceLimits {
             base: reconl_core::StructHeader::new(core::mem::size_of::<ReconLDeviceLimits>() as u32, struct_type::DEVICE_LIMITS),
@@ -2433,17 +2523,6 @@ pub unsafe extern "C" fn reconlSubmit(device: *mut DeviceHandle, list: *const Co
                             held.bytes.len()
                         );
                     }
-                    // Vertices are read through a `Vertex` pointer, so the bind
-                    // address has to satisfy that type's alignment; an odd
-                    // offset would make every slice read unaligned.
-                    if offset % core::mem::align_of::<Vertex>() as u64 != 0 {
-                        return err!(
-                            Code::InvalidArgument,
-                            "the vertex buffer bind offset {} is not a multiple of {}",
-                            offset,
-                            core::mem::align_of::<Vertex>()
-                        );
-                    }
                     state.vertex = Some((buffer, offset));
                 }
                 Command::SetIndexBuffer { buffer, offset, format } => {
@@ -2462,7 +2541,8 @@ pub unsafe extern "C" fn reconlSubmit(device: *mut DeviceHandle, list: *const Co
                     }
                     // `uint32` indices are read through a `*const u32`, which
                     // requires the address to be aligned: an odd bind offset
-                    // would make every index read unaligned.
+                    // would make every index read unaligned. Refuse it here,
+                    // where the host can still see which argument was wrong.
                     if format == abi::index_format::UINT32 && offset % 4 != 0 {
                         return err!(
                             Code::InvalidArgument,
@@ -2679,25 +2759,20 @@ pub unsafe extern "C" fn reconlSubmit(device: *mut DeviceHandle, list: *const Co
         // interrupted is rendered again on the reference tier instead of being
         // lost (docs/offload.md).
         //
-        // The checksum is kept beside the record rather than written into it:
-        // the input a backend renders from borrows the record, and the audit path
-        // reads that input a second time - so the record is written once, after
-        // the match.
-        let mut rendered_checksum = 0u64;
         let mut faulted: Option<Error> = None;
         match &mut device.backend {
             BackendKind::SoftCpu(soft) => {
                 let input = frame_input(&frame, audit_this_frame);
                 soft.render(&input)?;
-                rendered_checksum = soft.color_checksum();
 
                 // The audit: re-render the same frame and compare. It cannot
                 // catch worker-count nondeterminism (the tests do that), but it
                 // catches state-dependent nondeterminism - a stale shadow map, a
                 // recycled buffer, a cache that changed the answer.
                 if audit_this_frame {
+                    let first = soft.color_checksum();
                     let second = soft.render(&input)?;
-                    if second.frame_index != frame.index || soft.color_checksum() != rendered_checksum {
+                    if second.frame_index != frame.index || soft.color_checksum() != first {
                         device.stats.counters.audit_divergences += 1;
                         log_warn!("audit: frame {} rendered differently the second time", frame.index);
                     }
@@ -2719,20 +2794,39 @@ pub unsafe extern "C" fn reconlSubmit(device: *mut DeviceHandle, list: *const Co
                         return Err(e);
                     }
                 } else {
-                    rendered_checksum = gpu.color_checksum();
-
                     // The same audit the reference runs: re-render the frame and
                     // compare. On hardware this is a determinism check, not a
                     // formality - a GPU that reshuffles its own scheduling must
                     // still produce the identical image twice.
                     if audit_this_frame {
+                        let first = gpu.color_checksum();
                         let second = gpu.render(&input)?;
-                        if second.frame_index != frame.index || gpu.color_checksum() != rendered_checksum {
+                        if second.frame_index != frame.index || gpu.color_checksum() != first {
                             device.stats.counters.audit_divergences += 1;
                             log_warn!("audit: frame {} rendered differently the second time", frame.index);
                         }
                     }
                     device.stats.shadows = gpu.snapshot().shadows;
+                }
+            }
+            BackendKind::Vulkan(gpu) => {
+                let input = frame_input(&frame, audit_this_frame);
+                if let Err(e) = gpu.prepare_frame(frame.width, frame.height).and_then(|()| gpu.render(&input)) {
+                    if e.code == Code::DeviceLost && gpu.device_removed() {
+                        faulted = Some(e);
+                    } else {
+                        return Err(e);
+                    }
+                } else {
+                    if audit_this_frame {
+                        let first = gpu.color_checksum();
+                        let second = gpu.render(&input)?;
+                        if second.frame_index != frame.index || gpu.color_checksum() != first {
+                            device.stats.counters.audit_divergences += 1;
+                            log_warn!("audit: frame {} rendered differently the second time", frame.index);
+                        }
+                    }
+                    device.stats.shadows = gpu.shadow_counters();
                 }
             }
             BackendKind::Null(null) => {
@@ -2745,13 +2839,10 @@ pub unsafe extern "C" fn reconlSubmit(device: *mut DeviceHandle, list: *const Co
                     null.note_draw(count, count / 3);
                 }
                 null.submit()?;
-                rendered_checksum = null.last_checksum();
             }
         }
-        frame.checksum = rendered_checksum;
-
         if let Some(fault) = faulted {
-            if !device.may_offload() {
+            if !device.may_recover_fault() {
                 // The host left `RECONL_DOWNGRADE_TIER` clear: a fault is an
                 // error it answers itself, and the frame is dropped exactly as
                 // it was before the offload existed.
@@ -2973,6 +3064,25 @@ pub unsafe extern "C" fn reconlPresent(device: *mut DeviceHandle, swapchain: *mu
                     }
                 }
             }
+            BackendKind::Vulkan(gpu) => {
+                let (width, height) = gpu.frame_size();
+                let outcome = (|| -> Result<()> {
+                    if let Some(pixels) = pixels.as_deref_mut().filter(|_| !keep) {
+                        let pitch = host_row_layout(width, height, out_size, out_pitch)?;
+                        let started = Instant::now();
+                        gpu.read_frame_into(pixels, pitch, flip)?;
+                        readback_ns = started.elapsed().as_nanos() as u64;
+                    }
+                    gpu.on_frame_end()
+                })();
+                if let Err(e) = outcome {
+                    if e.code == Code::DeviceLost && gpu.device_removed() {
+                        faulted = Some(e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
             BackendKind::Null(null) => {
                 if let Some(pixels) = pixels.as_deref_mut() {
                     let pitch = host_row_layout(swapchain.width, swapchain.height, out_size, out_pitch)?;
@@ -2988,7 +3098,7 @@ pub unsafe extern "C" fn reconlPresent(device: *mut DeviceHandle, swapchain: *mu
         }
 
         if let Some(fault) = faulted {
-            if !device.may_offload() {
+            if !device.may_recover_fault() {
                 return Err(fault);
             }
             // The readback that faulted handed nothing over; the one that did

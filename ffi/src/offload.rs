@@ -113,6 +113,24 @@ impl DeviceHandle {
             && self.backend_id() == backend::D3D11
     }
 
+    /// Whether a hardware fault may continue the frames on the reference tier.
+    ///
+    /// Only a device running on hardware has a fault to recover from: the fault
+    /// path rebuilds the reference backend and adopts it, so a device already on
+    /// the reference tier - or one the null backend stands in for - has nothing
+    /// to hand over and answers the fault itself. For a hardware device the only
+    /// question is whether the host allowed a tier downgrade at all, which is
+    /// what makes a lost Vulkan device recoverable instead of failing the call
+    /// while a lost D3D11 device recovered.
+    ///
+    /// A fault is not an overload: there is no plan to compare and no backend to
+    /// come back to, because a faulted backend is not returned to. Overload
+    /// offload therefore stays D3D11-only, and nothing here returns to Vulkan.
+    pub(crate) fn may_recover_fault(&self) -> bool {
+        matches!(self.backend, BackendKind::D3d11(_) | BackendKind::Vulkan(_))
+            && (self.allow_downgrade & allow_downgrade::TIER) != 0
+    }
+
     /// Whether this device is currently rendering on the reference tier because
     /// it offloaded there, as opposed to having been created there.
     fn offloaded(&self) -> bool {
@@ -159,6 +177,7 @@ impl DeviceHandle {
         match &mut self.backend {
             BackendKind::SoftCpu(d) => d.relabel(to, reason),
             BackendKind::D3d11(d) => d.relabel(to, reason),
+            BackendKind::Vulkan(d) => d.relabel(to, reason),
             BackendKind::Null(_) => {}
         }
         self.tier = to;
@@ -202,6 +221,9 @@ impl DeviceHandle {
             }
             BackendKind::D3d11(d) => {
                 (d.tier(), d.caps(), d.device_name(), d.driver(), backend::D3D11)
+            }
+            BackendKind::Vulkan(d) => {
+                (d.tier(), d.caps(), d.device_name(), d.driver(), backend::VULKAN)
             }
             BackendKind::Null(d) => {
                 (d.tier(), d.caps(), d.device_name(), d.driver(), backend::NULL)
@@ -321,7 +343,10 @@ impl DeviceHandle {
         // alone - it has no quality tiers of its own and reports the tier the
         // host asked it to claim.
         if self.ladder.acting()
-            && matches!(self.backend, BackendKind::SoftCpu(_) | BackendKind::D3d11(_))
+            && matches!(
+                self.backend,
+                BackendKind::SoftCpu(_) | BackendKind::D3d11(_) | BackendKind::Vulkan(_)
+            )
         {
             self.relabel_on_overload(frame_index);
         }
@@ -918,5 +943,42 @@ mod fault_tests {
             "the frame the hardware could not finish is not the frame the reference tier renders \
              for the same draws"
         );
+    }
+
+    /// A Vulkan device that loses its device gets the same reference-tier
+    /// fallback as a D3D11 one: fault recovery asks only whether the host
+    /// allowed a downgrade, so which hardware backend faulted does not matter.
+    /// The overload predicate stays D3D11-only - a fault is not a comparison,
+    /// and this change does not add a return to Vulkan.
+    #[test]
+    fn a_vulkan_device_may_recover_a_fault() {
+        if !reconl_backend_vulkan::hardware_available() {
+            eprintln!(
+                "no usable Vulkan device on this machine; the fault predicate is a hardware \
+                 story, so this leg is skipped rather than approximated"
+            );
+            return;
+        }
+        unsafe {
+            let rig = Rig::new(abi::backend::VULKAN, 1);
+            assert!(
+                (*rig.device).may_recover_fault(),
+                "a Vulkan device created with RECONL_DOWNGRADE_TIER must recover on the \
+                 reference tier"
+            );
+            assert!(
+                !(*rig.device).may_offload(),
+                "overload offload stays D3D11-only: a Vulkan device has no return trip to rebuild"
+            );
+
+            // The null backend is not hardware: the fault path rebuilds a
+            // reference backend and adopts it, so a device already standing in
+            // for one has nothing to recover onto and must answer the fault.
+            let null = Rig::new(abi::backend::NULL, 1);
+            assert!(
+                !(*null.device).may_recover_fault(),
+                "a device without hardware must not claim a fault recovery"
+            );
+        }
     }
 }
