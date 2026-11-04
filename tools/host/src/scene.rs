@@ -216,6 +216,32 @@ impl ShadowSpec {
         }
     }
 
+    /// A custom shadow configuration for benchmarking.
+    ///
+    /// `texel_budget_bytes` is the total texel budget across all cascades.
+    /// The library partitions it across cascades and scales it per tier.
+    pub fn custom(
+        cascade_count: u32,
+        texel_budget_bytes: u64,
+        filter: u32,
+    ) -> ShadowSpec {
+        ShadowSpec {
+            enabled: true,
+            cascade_count,
+            texel_budget_bytes,
+            filter,
+            max_distance: 77.0,
+            blend_band: 3.0,
+            normal_bias: 1.25,
+            depth_bias: 5.0e-4,
+            slope_bias: 1.75,
+            resolution_scale: 1.0,
+            allow_disk_cache: false,
+            freeze_static_cascade: false,
+            refresh_interval_frames: 1,
+        }
+    }
+
     /// The reference configuration in one of the three measured modes.
     pub fn for_mode(mode: ShadowMode) -> ShadowSpec {
         let mut spec = ShadowSpec::reference();

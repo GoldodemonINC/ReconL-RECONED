@@ -34,7 +34,7 @@
 use reconl::abi;
 use reconl_host::device::{Config, Device};
 use reconl_host::frame::{FrameCost, Options as RenderOptions, Renderer};
-use reconl_host::scene::{Scene, ShadowMode};
+use reconl_host::scene::{Scene, ShadowMode, ShadowSpec};
 use reconl_host::units::{self, bytes, fps, mpix_per_sec, ns};
 use reconl_host::names;
 use std::process::ExitCode;
@@ -57,6 +57,9 @@ OPTIONS:
   --resolution=WxH      shorthand for both
   --repeat=N            draw the scene N times per frame (default 1)
   --shadows=off|on|cached   shadow mode (default on)
+  --shadow-cascades=N       shadow cascade count (default 2)
+  --shadow-budget=SIZE      total texel budget across all cascades, e.g. 64MB
+                            (default 8MB — the reference scene's budget)
   --threads=N           worker threads; 0 lets the backend choose
   --ram-cap=SIZE        device RAM cap, e.g. 64MB
   --vram-cap=SIZE       device video memory cap
@@ -79,7 +82,7 @@ OPTIONS:
   --png=PATH            write the last frame as an RGBA PNG
   --help                this text
 
-Sizes accept B, K, M, G and T, all binary: 64MB is 64 MiB.
+Shadow budgets accept B, K, M, G and T, all binary: 64MB is 64 MiB.
 ";
 
 fn main() -> ExitCode {
@@ -93,7 +96,7 @@ fn main() -> ExitCode {
     }
 }
 
-const FLAGS: [&str; 24] = [
+const FLAGS: [&str; 26] = [
     "--backend",
     "--tier",
     "--adapter",
@@ -104,6 +107,8 @@ const FLAGS: [&str; 24] = [
     "--resolution",
     "--repeat",
     "--shadows",
+    "--shadow-cascades",
+    "--shadow-budget",
     "--threads",
     "--ram-cap",
     "--vram-cap",
@@ -129,6 +134,8 @@ struct Options {
     height: u32,
     repeat: u32,
     shadows: ShadowMode,
+    shadow_cascades: u32,
+    shadow_budget: u64,
     audit_every: Option<u32>,
     trace: Option<String>,
     png: Option<String>,
@@ -151,6 +158,8 @@ fn options_from(args: &[String]) -> Result<Options, String> {
         height: 64,
         repeat: 1,
         shadows: ShadowMode::On,
+        shadow_cascades: 2,
+        shadow_budget: 8 << 20,
         audit_every: None,
         trace: None,
         png: None,
@@ -198,6 +207,12 @@ fn options_from(args: &[String]) -> Result<Options, String> {
     if let Some(v) = units::value_of(args, "--shadows") {
         options.shadows =
             ShadowMode::from_name(v).ok_or_else(|| format!("`{v}` is not a shadow mode: off, on or cached"))?;
+    }
+    if let Some(v) = units::value_of(args, "--shadow-cascades") {
+        options.shadow_cascades = units::parse_positive(v, "shadow cascade count")?;
+    }
+    if let Some(v) = units::value_of(args, "--shadow-budget") {
+        options.shadow_budget = units::parse_size(v)?;
     }
     if let Some(v) = units::value_of(args, "--threads") {
         config.threads = units::parse_u32(v, "thread count")?;
@@ -311,7 +326,17 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
     }
     units::reject_unknown(args, &FLAGS)?;
     let options = options_from(args)?;
-    let scene = Scene::with_shadow_mode(options.shadows);
+    let scene = {
+        let mut scene = Scene::with_shadow_mode(options.shadows);
+        if options.shadows != ShadowMode::Off {
+            scene.shadows = ShadowSpec::custom(
+                options.shadow_cascades,
+                options.shadow_budget,
+                scene.shadows.filter,
+            );
+        }
+        scene
+    };
 
     let (mut major, mut minor, mut patch) = (0u32, 0u32, 0u32);
     // SAFETY: the three out-pointers borrow local `u32`s for the duration of
