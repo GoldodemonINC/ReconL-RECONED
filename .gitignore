@@ -36,3 +36,12 @@
 
 # Python bytecode from the spike checks
 __pycache__/
+
+# Render comparison screenshots (multi-MB PNGs, regenerated locally)
+/shots/
+
+# C# build output and its copied sources
+/cs/build/
+
+# SwiftShader/raster sweep scratch from reconl-bench
+/tools/reconl-bench/sweep-results/
